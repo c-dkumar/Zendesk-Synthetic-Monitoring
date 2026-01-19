@@ -1,0 +1,21 @@
+{
+  "name": "zendesk-status-checker",
+  "version": "1.0.0",
+  "description": "A Node.js application to pull data from the Zendesk status API.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "zendesk",
+    "api",
+    "status"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^0.21.1",
+    "coralogix-logger": "^1.1.10",
+    "dotenv": "^10.0.0"
+  }
+}
