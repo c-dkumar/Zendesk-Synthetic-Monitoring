@@ -226,13 +226,15 @@ async function checkTicketVolume(channelName, searchFilter, className) {
     const count = response.data.count;
     console.log(`${channelName} Ticket volume check successful. Tickets created in last hour: ${count}`);
 
-    sendLog({
+ 
+      sendLog({
       severity: Coralogix.Severity.INFO,
-      text: count,
+      text: JSON.stringify({
+        zendeskActualTicketCount:parseInt(count, 10),
+      }),
       className: className,
-      methodName: 'checkTicketVolume',
-      [`Zendesk${channelName.replace(/\s/g, '')}TicketCount`]: count,
-      other: { ticketCount: count, timeWindow: '1h', channel: channelName.toLowerCase() }
+      methodName: 'checkTicketVolume'
+
     });
   } catch (error) {
     const isTimeout = error.code === 'ECONNABORTED';
@@ -293,4 +295,5 @@ async function main() {
 }
 
 // Run the main function
+
 main();
