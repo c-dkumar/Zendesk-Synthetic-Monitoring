@@ -20,7 +20,7 @@ function initializeCoralogix() {
 
   // Coralogix configuration
   const config = new Coralogix.LoggerConfig({
-    debug: true,
+    debug: false,
     privateKey: process.env.CORALOGIX_PRIVATE_KEY,
     applicationName: 'Zendesk-Status-Checker',
     subsystemName: 'Incidents'
@@ -297,3 +297,4 @@ async function main() {
 // Run the main function
 
 main();
+
