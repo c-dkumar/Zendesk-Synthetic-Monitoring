@@ -14,8 +14,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.504.0",
     "axios": "^0.21.1",
-    "coralogix-logger": "^1.1.10",
-    "dotenv": "^10.0.0"
+    "coralogix-logger": "^1.1.10"
   }
 }
