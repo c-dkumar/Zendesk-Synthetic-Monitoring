@@ -1,32 +1,63 @@
-require('dotenv').config();
 const axios = require('axios');
 const Coralogix = require('coralogix-logger');
+const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
 
 // Global logger instance
 let logger;
+let config; // To hold secrets
+
+/**
+ * Fetches secrets from AWS Secrets Manager.
+ */
+async function getSecrets() {
+  if (config) {
+    return config;
+  }
+
+  const secretName = process.env.SECRET_NAME;
+  if (!secretName) {
+    throw new Error('FATAL ERROR: SECRET_NAME environment variable is not set.');
+  }
+
+  const client = new SecretsManagerClient({ region: process.env.AWS_REGION });
+  try {
+    const command = new GetSecretValueCommand({ SecretId: secretName });
+    const data = await client.send(command);
+
+    if (data.SecretString) {
+      config = JSON.parse(data.SecretString);
+      return config;
+    } else {
+      // Handle binary secret if needed
+      const buff = Buffer.from(data.SecretBinary, 'base64');
+      config = JSON.parse(buff.toString('ascii'));
+      return config;
+    }
+  } catch (error) {
+    console.error('FATAL ERROR: Failed to fetch secrets from AWS Secrets Manager.', error);
+    throw error; // Re-throw to fail the Lambda invocation
+  }
+}
 
 /**
  * Initializes the Coralogix logger.
  * This must be called before any logging can occur.
  */
-function initializeCoralogix() {
+function initializeCoralogix(appConfig) {
   // Validate Coralogix Private Key
-  if (!process.env.CORALOGIX_PRIVATE_KEY || process.env.CORALOGIX_PRIVATE_KEY === 'YOUR_PRIVATE_KEY') {
-    console.error('FATAL ERROR: CORALOGIX_PRIVATE_KEY is not set.');
-    console.error('Please create a .env file and add your Coralogix private key.');
-    console.error('Example: CORALOGIX_PRIVATE_KEY=your-actual-private-key-goes-here');
-    process.exit(1); // Exit with an error code
+  if (!appConfig.CORALOGIX_PRIVATE_KEY || appConfig.CORALOGIX_PRIVATE_KEY === 'YOUR_PRIVATE_KEY') {
+    throw new Error('FATAL ERROR: CORALOGIX_PRIVATE_KEY is not set in secrets.');
   }
 
   // Coralogix configuration
-  const config = new Coralogix.LoggerConfig({
+  const coralogixConfig = new Coralogix.LoggerConfig({
     debug: false,
-    privateKey: process.env.CORALOGIX_PRIVATE_KEY,
+    privateKey: appConfig.CORALOGIX_PRIVATE_KEY,
     applicationName: 'Zendesk-Status-Checker',
     subsystemName: 'Incidents'
   });
 
-  Coralogix.CoralogixLogger.configure(config);
+  Coralogix.CoralogixLogger.configure(coralogixConfig);
   logger = new Coralogix.CoralogixLogger('ZendeskStatus');
 
   console.log('Coralogix logger initialized.');
@@ -61,11 +92,9 @@ async function flushLogs() {
   }
 }
 
-const ZENDESK_API_URL = 'https://status.zendesk.com/api/incidents/active?subdomain=globalization-partners';
-
-async function getZendeskIncidents() {
+async function getZendeskIncidents(appConfig) {
   try {
-    const response = await axios.get(ZENDESK_API_URL, { timeout: 10000 });
+    const response = await axios.get(appConfig.ZENDESK_API_URL, { timeout: 10000 });
     const { data: incidents, included } = response.data;
 
     if (incidents && incidents.length > 0) {
@@ -129,10 +158,10 @@ async function getZendeskIncidents() {
  * Checks the health of the primary Zendesk URL.
  * It expects a 401 Unauthorized response as a sign of health.
  */
-async function checkZendeskHealth() {
-  const url = process.env.ZENDESK_HEALTH_CHECK_URL;
+async function checkZendeskHealth(appConfig) {
+  const url = appConfig.ZENDESK_HEALTH_CHECK_URL;
   if (!url) {
-    console.error('ZENDESK_HEALTH_CHECK_URL is not set in .env file.');
+    console.error('ZENDESK_HEALTH_CHECK_URL is not set in secrets.');
     sendLog({
       severity: Coralogix.Severity.ERROR,
       text: 'Configuration Error: ZENDESK_HEALTH_CHECK_URL is not set.',
@@ -181,16 +210,17 @@ async function checkZendeskHealth() {
 
 /**
  * Generic function to check ticket volume for a specific channel.
- * Requires ZENDESK_SUBDOMAIN, ZENDESK_EMAIL, and ZENDESK_API_TOKEN in .env.
+ * Requires ZENDESK_SUBDOMAIN, ZENDESK_EMAIL, and ZENDESK_API_TOKEN.
  * 
  * @param {string} channelName - The human-readable name of the channel (e.g., 'Email', 'Web').
  * @param {string} searchFilter - The Zendesk search filter (e.g., 'via:mail').
  * @param {string} className - The Coralogix class name for logging.
+ * @param {object} appConfig - The application configuration containing secrets.
  */
-async function checkTicketVolume(channelName, searchFilter, className) {
-  const subdomain = process.env.ZENDESK_SUBDOMAIN;
-  const email = process.env.ZENDESK_EMAIL;
-  const apiToken = process.env.ZENDESK_API_TOKEN;
+async function checkTicketVolume(channelName, searchFilter, className, appConfig) {
+  const subdomain = appConfig.ZENDESK_SUBDOMAIN;
+  const email = appConfig.ZENDESK_EMAIL;
+  const apiToken = appConfig.ZENDESK_API_TOKEN;
 
   if (!subdomain || !email || !apiToken) {
     console.warn(`Skipping ${channelName} Ticket Volume Check: Missing credentials.`);
@@ -225,16 +255,17 @@ async function checkTicketVolume(channelName, searchFilter, className) {
 
     const count = response.data.count;
     console.log(`${channelName} Ticket volume check successful. Tickets created in last hour: ${count}`);
+    
 
- 
-      sendLog({
+    sendLog({
       severity: Coralogix.Severity.INFO,
       text: JSON.stringify({
         zendeskActualTicketCount:parseInt(count, 10),
       }),
       className: className,
       methodName: 'checkTicketVolume'
-
+      // [`Zendesk${channelName.replace(/\s/g, '')}TicketCount`]: count,
+      // other: { zendeskActualTicketCount: parseInt(count, 10), timeWindow: '1h', channel: channelName.toLowerCase() }
     });
   } catch (error) {
     const isTimeout = error.code === 'ECONNABORTED';
@@ -252,23 +283,25 @@ async function checkTicketVolume(channelName, searchFilter, className) {
 /**
  * Main function to orchestrate the monitoring checks.
  */
-async function main() {
-  // Initialize Coralogix first
-  initializeCoralogix();
-
-  console.log('Starting Zendesk monitoring checks...');
-  
-  // Run all monitoring tasks concurrently
+exports.handler = async function(event, context) {
   try {
-    // Run all monitoring tasks concurrently and capture results
+    // Fetch secrets first
+    const appConfig = await getSecrets();
+
+    // Initialize Coralogix with the fetched secret
+    initializeCoralogix(appConfig);
+
+    console.log('Starting Zendesk monitoring checks...');
+    
+    // Run all monitoring tasks concurrently and pass config
     const results = await Promise.allSettled([
-      getZendeskIncidents(),
-      checkZendeskHealth(),
-      checkTicketVolume('Email', 'via:mail', 'ZendeskEmailTicketCheck'),
-      checkTicketVolume('Web', 'via:web', 'ZendeskWebTicketCheck'),
-      checkTicketVolume('Messaging', 'via:native_messaging', 'ZendeskMessagingTicketCheck'),
-      checkTicketVolume('API', 'via:api', 'ZendeskApiTicketCheck'),
-      checkTicketVolume('Sunshine Conversations API', 'via:sunshine_conversations_api', 'ZendeskSunshineConversationsApiTicketCheck')
+      getZendeskIncidents(appConfig),
+      checkZendeskHealth(appConfig),
+      checkTicketVolume('Email', 'via:mail', 'ZendeskEmailTicketCheck', appConfig),
+      checkTicketVolume('Web', 'via:web', 'ZendeskWebTicketCheck', appConfig),
+      checkTicketVolume('Messaging', 'via:native_messaging', 'ZendeskMessagingTicketCheck', appConfig),
+      checkTicketVolume('API', 'via:api', 'ZendeskApiTicketCheck', appConfig),
+      checkTicketVolume('Sunshine Conversations API', 'via:sunshine_conversations_api', 'ZendeskSunshineConversationsApiTicketCheck', appConfig)
     ]);
 
     // Inspect results to ensure any unhandled rejections are logged
@@ -294,7 +327,5 @@ async function main() {
   }
 }
 
-// Run the main function
-
-main();
-
+// The main function is now the handler, exported above.
+// The Lambda service will call it.
